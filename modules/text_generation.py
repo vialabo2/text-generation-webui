@@ -7,6 +7,33 @@ import traceback
 import numpy as np
 import torch
 import transformers
+import inspect
+
+import os
+from modelutils import *
+from modules.tools import load_tools
+from modules.agent import CustomAgentGuidance
+
+import guidance
+from langchain.utilities import GoogleSerperAPIWrapper
+serper_api_key = os.environ.get("df70ce88d780694ad36e052dbca0766b1ff95675")
+search = GoogleSerperAPIWrapper(
+    k=10,
+    gl='us',
+    hl='en',
+    type='search',
+    tbs=None,
+    serper_api_key=serper_api_key,
+    aiosession=None,
+    result_key_for_type={
+        'news': 'news',
+        'places': 'places',
+        'images': 'images',
+        'search': 'organic'
+    }
+)
+dict_tools = load_tools()
+custom_agent = CustomAgentGuidance(guidance, dict_tools)
 
 import modules.shared as shared
 from modules.callbacks import (Iteratorize, Stream,
@@ -147,6 +174,8 @@ def stop_everything_event():
 
 
 def generate_reply_wrapper(question, state, eos_token=None, stopping_strings=None):
+    # Generate seed here
+    seed = set_manual_seed(state['seed'])
     for reply in generate_reply(question, state, eos_token, stopping_strings, is_chat=False):
         if shared.model_type not in ['HF_seq2seq']:
             reply = question + reply
@@ -163,13 +192,19 @@ def generate_reply(question, state, eos_token=None, stopping_strings=None, is_ch
             yield question
             return
 
-        if shared.model_type in ['rwkv', 'llamacpp']:
+        if shared.settings['use_guided_inference']:
+            generate_func = generate_reply_guided
+        elif shared.model_type in ['rwkv', 'llamacpp']:
             generate_func = generate_reply_custom
         elif shared.args.flexgen:
             generate_func = generate_reply_flexgen
         else:
             generate_func = generate_reply_HF
 
+                
+    print(f"Function: {generate_func.__name__}")
+    print(f"Signature: {inspect.signature(generate_func)}")
+            
     # Preparing the input
     original_question = question
     if not is_chat:
@@ -183,6 +218,53 @@ def generate_reply(question, state, eos_token=None, stopping_strings=None, is_ch
     seed = set_manual_seed(state['seed'])
     for reply in generate_func(question, original_question, seed, state, eos_token, stopping_strings, is_chat=is_chat):
         yield reply
+
+def apply_guidance_on_prompt(question):
+    valid_answers = ['Action', 'Final Answer']
+    valid_tools = ['Google Search']
+    
+    
+    # Use the guidance function to create a new function
+    prompt_template = question
+    prompt = guidance(prompt_template)
+
+    # Print the parameters
+    print("Question:", question)
+    print("Search function:", search)
+    print("Valid answers:", valid_answers)
+    print("Valid tools:", valid_tools)
+
+    result = prompt(question=question, search=search, valid_answers=valid_answers, valid_tools=valid_tools)
+
+    print("Result:", result)  # Print the result
+    # This is where you'd use the Guidance library to generate a response
+
+    return result
+
+        
+def generate_reply_guided(question, original_question, seed, state, eos_token=None, stopping_strings=None, is_chat=False, generate_func=None):
+    state = apply_extensions('state', state)
+    print(inspect.signature(generate_reply_guided))
+
+    # Ensuring that a model is loaded
+    if shared.model_name == 'None' or shared.model is None:
+        logging.error("No model is loaded! Select one in the Model tab.")
+        yield question
+        return
+        
+    # Here replace `generate_func()` with appropriate function
+    if generate_func is not None:  # Add this line to ensure there's a function provided
+        for reply in generate_func(question=question, seed=seed, state=state, eos_token=eos_token, stopping_strings=stopping_strings, is_chat=is_chat):
+
+
+            yield reply
+
+    # Now we use the guidance process to generate the reply
+    reply = str(custom_agent(question))  # define apply_guidance_on_prompt() as per the guidance logic you have
+    yield reply 
+    shared.settings['use_guided_inference'] = False
+    
+   
 
 
 def generate_reply_HF(question, original_question, seed, state, eos_token=None, stopping_strings=None, is_chat=False):

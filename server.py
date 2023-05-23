@@ -3,6 +3,7 @@ import warnings
 
 import requests
 
+s.environ["NUMEXPR_MAX_THREADS"] = "16"
 from modules.logging_colors import logger
 
 os.environ['GRADIO_ANALYTICS_ENABLED'] = 'False'
@@ -44,6 +45,14 @@ import torch
 import yaml
 from PIL import Image
 
+from modelutils import *
+from modules.tools import load_tools
+from modules.agent import CustomAgentGuidance
+import guidance
+from langchain.utilities import GoogleSerperAPIWrapper
+os.environ["SERPER_API_KEY"] = 'df70ce88d780694ad36e052dbca0766b1ff95675'
+search = GoogleSerperAPIWrapper()
+
 import modules.extensions as extensions_module
 from modules import chat, shared, training, ui, utils
 from modules.extensions import apply_extensions
@@ -52,6 +61,32 @@ from modules.LoRA import add_lora_to_model
 from modules.models import load_model, load_soft_prompt, unload_model
 from modules.text_generation import (generate_reply_wrapper,
                                      get_encoded_length, stop_everything_event)
+ 
+dict_tools = load_tools()
+custom_agent = CustomAgentGuidance(guidance, dict_tools)
+
+def set_guided_inference():
+    shared.settings['use_guided_inference'] = False
+
+def load_model_and_initialize_guidance(model_name):
+    # Load the base model and tokenizer
+    model, tokenizer = load_model(model_name)
+
+    if 'ggml' in model_name:
+        # Create a LlamaCppSettings instance and set the model path.
+        settings = guidance.llms.LlamaCppSettings()
+        settings.model = "../models/" + model_name
+
+        # Create a LlamaCpp instance and pass the settings to it.
+        llama = guidance.llms.LlamaCpp(settings=settings)
+    else:
+        # Initialize the guidance model
+        llama = guidance.llms.Transformers(model=model, tokenizer=tokenizer, device=0)
+    
+    guidance.llm = llama
+ 
+
+    return model, tokenizer
 
 
 def load_model_wrapper(selected_model, autoload=False):
@@ -67,7 +102,7 @@ def load_model_wrapper(selected_model, autoload=False):
             shared.model_name = selected_model
             unload_model()
             if selected_model != '':
-                shared.model, shared.tokenizer = load_model(shared.model_name)
+                shared.model, shared.tokenizer = load_model_and_initialize_guidance(shared.model_name)
 
             yield f"Successfully loaded {selected_model}"
         except:
@@ -733,6 +768,7 @@ def create_interface():
                             shared.gradio['open_save_prompt'] = gr.Button('Save prompt', elem_classes="small-button")
                             shared.gradio['save_prompt'] = gr.Button('Confirm save prompt', visible=False, elem_classes="small-button")
                             shared.gradio['count_tokens'] = gr.Button('Count tokens', elem_classes="small-button")
+                            shared.gradio['guided_inference_button'] = gr.Button('Guidance', variant='primary', elem_classes="small-button")
 
                         with gr.Row():
                             with gr.Column():
@@ -756,6 +792,16 @@ def create_interface():
 
             with gr.Tab("Parameters", elem_id="parameters"):
                 create_settings_menus(default_preset)
+                                
+                        
+        # Define a function to be run when the button is clicked
+        def on_button_clicked():
+            shared.settings['use_guided_inference'] = True
+
+
+        # Connect the function to the button's on_click event
+        shared.gradio['guided_inference_button'].click(on_button_clicked)
+
 
         # Model tab
         with gr.Tab("Model", elem_id="model-tab"):
@@ -934,6 +980,14 @@ def create_interface():
                 generate_reply_wrapper, shared.input_params, output_params, show_progress=False).then(
                 lambda: None, None, None, _js=f"() => {{{audio_notification_js}}}")
                 # lambda: None, None, None, _js="() => {element = document.getElementsByTagName('textarea')[0]; element.scrollTop = element.scrollHeight}")
+            )
+            gen_events.append(shared.gradio['guided_inference_button'].click(
+                lambda x: x, shared.gradio['textbox'], shared.gradio['last_input']).then(
+                ui.gather_interface_values, [shared.gradio[k] for k in shared.input_elements], shared.gradio['interface_state']).then(
+                generate_reply_wrapper, shared.input_params, output_params, show_progress=False).then(
+                None, None, None, _js=f"() => {{{audio_notification_js}}}")    
+                # None, None, None, _js="() => {element = document.getElementsByTagName('textarea')[0]; element.scrollTop = element.scrollHeight}")   
+
             )
 
             gen_events.append(shared.gradio['textbox'].submit(

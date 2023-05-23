@@ -46,6 +46,7 @@ settings = {
     'greeting': '',
     'turn_template': '',
     'custom_stopping_strings': '',
+    'use_guided_inference': False,
     'stop_at_newline': False,
     'add_bos_token': True,
     'ban_eos_token': False,
